@@ -1737,7 +1737,7 @@ app.layout = html.Div([
             dcc.Dropdown(
                 id='offset-dropdown',
                 options=[{'label': f'{i/10:.1f}', 'value': i/10} for i in range(-500, 501, 5)],  # -50.0 to +50.0 in 0.5 increments
-                value=0,
+                value=25.5,
                 style={'width': '150px', 'display': 'inline-block'}
             ),
             html.Span(" (Applied to TEST data only)", style={'marginLeft': '10px', 'fontStyle': 'italic'})
