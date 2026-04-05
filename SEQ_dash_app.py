@@ -257,6 +257,8 @@ def load_por_data():
             'source': 'POR'
         })
         
+    except FileNotFoundError:
+        print("POR data file not found: POR/POR-Raw.csv")
     except Exception as e:
         print(f"Error loading POR data: {e}")
     
@@ -1718,6 +1720,15 @@ app.layout = html.Div([
     html.H1("Comprehensive Thickness Data Analysis: TEST vs POR", 
             style={'textAlign': 'center', 'marginBottom': '30px'}),
     
+    # Show notice when POR data is missing
+    html.Div([
+        html.Div([
+            html.H4("⚠️ Notice: POR Data Not Available", style={'margin': '0', 'color': '#d62728'}),
+            html.P("Only TEST data will be displayed. Some comparison features are disabled.", 
+                   style={'margin': '5px 0 0 0', 'fontSize': '14px'})
+        ], style={'padding': '15px', 'backgroundColor': '#fff2cc', 'border': '1px solid #d6b656', 'borderRadius': '5px'})
+    ], style={'marginBottom': '20px'}) if por_df.empty else html.Div(),
+    
     # Matching Offset Controls
     html.Div([
         html.H3("Matching Offset Control"),
@@ -1744,9 +1755,9 @@ app.layout = html.Div([
             ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top'}),
             
             html.Div([
-                html.H3(f"POR Data: {len(por_df[por_df['Label'] == 'Layer 1 Thickness'])} thickness measurements", 
-                        style={'color': 'red'}),
-                html.P(f"Source: CSV file from POR folder (Entities: {', '.join(por_df['Entity'].unique()) if not por_df.empty else 'None'})")
+                html.H3(f"POR Data: {len(por_df[por_df['Label'] == 'Layer 1 Thickness'])} thickness measurements" if not por_df.empty else "POR Data: No data available", 
+                        style={'color': 'red' if not por_df.empty else 'orange'}),
+                html.P(f"Source: CSV file from POR folder (Entities: {', '.join(por_df['Entity'].unique())})" if not por_df.empty else "Source: POR/POR-Raw.csv not found or empty")
             ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top', 'marginLeft': '4%'})
         ])
     ], style={'margin': '20px 0', 'padding': '15px', 'backgroundColor': '#f8f9fa', 'borderRadius': '5px'}),
