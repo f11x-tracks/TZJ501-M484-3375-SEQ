@@ -19,3 +19,7 @@ copy the TEST Date Time Series and create another chart that is grouped by DECK.
 for the TEST data add a spline where it plots the thickness by DECK. X axis is radius from 0-150mm. and add a drop down so i can select one or multiple 'File Name' to plot. 
 
 add an option to export the TEST data to excel. it should have Statistical Summary by COATER. each row should be data from one of the File Name. So there should be a row for each File Name in TEST. There should be 24 columns. 8 COAT and 3 columns for each COAT. The columns should be 1301 Mean Thickness (Å), 1301 Avg delta to previous run (will be blank for first row), 1301 std dev. then next 3 columns are same columns but for 1401, then 1303, 1403, 1302, 1402, 1304, 1404. 
+
+duplicate the TEST Thickness vs Radius by DECK (Spline Analysis) and POR Thickness vs Radius by COATER (Spline Analysis) and make contour plot versions. the x and y scale axis should be limited to +/- 150mm. they should use the same drop down used for the spline analysis where the user selects the files
+the thickness should be an aggragate of the files selected
+and the size should be around 800px

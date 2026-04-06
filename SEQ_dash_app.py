@@ -1418,6 +1418,369 @@ def make_por_radius_spline_plot(selected_entities=None):
     
     return dcc.Graph(figure=fig)
 
+def make_test_contour_plot(selected_files=None, offset=0):
+    """Create contour plot of TEST thickness aggregated across selected files by DECK"""
+    # Apply offset to TEST data
+    modified_test_df = apply_offset_to_test_data(test_df, offset)
+    
+    if modified_test_df.empty:
+        return html.Div("No TEST data available for contour analysis")
+    
+    # Filter for thickness data only
+    thickness_data = modified_test_df[modified_test_df['Label'] == 'Layer 1 Thickness'].copy()
+    
+    if thickness_data.empty:
+        return html.Div("No TEST thickness data available")
+    
+    # Add DECK mapping
+    thickness_data['DECK'] = thickness_data['COATER'].map(COATER_TO_DECK_MAPPING)
+    
+    # Filter by selected files if specified
+    if selected_files:
+        thickness_data = thickness_data[thickness_data['FileName'].isin(selected_files)]
+        
+    if thickness_data.empty:
+        return html.Div("No data available for selected files")
+    
+    # Convert coordinates to numeric and filter to within wafer radius (150mm)
+    thickness_data['X_coord'] = pd.to_numeric(thickness_data['XWaferLoc'], errors='coerce')
+    thickness_data['Y_coord'] = pd.to_numeric(thickness_data['YWaferLoc'], errors='coerce')
+    
+    # Calculate radius for each point and filter to within wafer boundary (≤ 150mm)
+    thickness_data['calc_radius'] = np.sqrt(thickness_data['X_coord']**2 + thickness_data['Y_coord']**2)
+    
+    thickness_data = thickness_data[
+        (thickness_data['X_coord'].notna()) & 
+        (thickness_data['Y_coord'].notna()) &
+        (thickness_data['calc_radius'] <= 150)  # Only points within wafer boundary
+    ].copy()
+    
+    if thickness_data.empty:
+        return html.Div("No thickness data with valid coordinates (within 150mm radius) available")
+    
+    # Aggregate data by averaging thickness at each X,Y coordinate across all selected files for each DECK
+    aggregated_data = thickness_data.groupby(['DECK', 'X_coord', 'Y_coord'])['Datum'].mean().reset_index()
+    
+    # Create the figure with subplots for each deck
+    decks = sorted(aggregated_data['DECK'].unique())
+    n_decks = len(decks)
+    
+    if n_decks == 0:
+        return html.Div("No valid DECK data for contour plot")
+    
+    # Calculate subplot layout (2x2 grid for up to 4 decks)
+    cols = min(2, n_decks)
+    rows = (n_decks + 1) // 2
+    
+    from plotly.subplots import make_subplots
+    
+    fig = make_subplots(
+        rows=rows, cols=cols,
+        subplot_titles=[f'DECK {deck}' for deck in decks],
+        specs=[[{'type': 'scattergl'}] * cols] * rows
+    )
+    
+    # Define colors for each deck
+    deck_colors = ['Blues', 'Oranges', 'Greens', 'Reds']
+    
+    for i, deck in enumerate(decks):
+        deck_data = aggregated_data[aggregated_data['DECK'] == deck]
+        
+        if deck_data.empty:
+            continue
+            
+        row = (i // cols) + 1
+        col = (i % cols) + 1
+        
+        # Create interpolation grid for circular contour
+        xi = np.linspace(-150, 150, 100)
+        yi = np.linspace(-150, 150, 100)
+        xi_grid, yi_grid = np.meshgrid(xi, yi)
+        
+        # Create circular mask for 150mm wafer
+        mask = np.sqrt(xi_grid**2 + yi_grid**2) <= 150
+        
+        # Interpolate data onto grid
+        points = deck_data[['X_coord', 'Y_coord']].values
+        values = deck_data['Datum'].values
+        zi = griddata(points, values, (xi_grid, yi_grid), method='cubic')
+        
+        # Apply circular mask
+        zi[~mask] = np.nan
+        
+        # Create contour plot for this deck
+        fig.add_trace(
+            go.Contour(
+                x=xi,
+                y=yi,
+                z=zi,
+                colorscale=deck_colors[i % len(deck_colors)],
+                contours=dict(
+                    showlabels=True,
+                    labelfont=dict(size=10),
+                ),
+                hovertemplate='<b>DECK %{fullData.name}</b><br>' +
+                              'X: %{x:.1f} mm<br>' +
+                              'Y: %{y:.1f} mm<br>' +
+                              'Thickness: %{z:.1f} Å<br>' +
+                              '<extra></extra>',
+                name=deck,
+                showscale=True if i == 0 else False  # Only show colorbar for first plot
+            ),
+            row=row, col=col
+        )
+        
+        # Add scatter points to show actual measurement locations
+        fig.add_trace(
+            go.Scattergl(
+                x=deck_data['X_coord'],
+                y=deck_data['Y_coord'],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color='black',
+                    opacity=0.6
+                ),
+                name=f'{deck} Points',
+                showlegend=False,
+                hoverinfo='skip'
+            ),
+            row=row, col=col
+        )
+        
+        # Add wafer boundary circle (150mm radius)
+        theta = np.linspace(0, 2*np.pi, 100)
+        circle_x = 150 * np.cos(theta)
+        circle_y = 150 * np.sin(theta)
+        
+        fig.add_trace(
+            go.Scattergl(
+                x=circle_x,
+                y=circle_y,
+                mode='lines',
+                line=dict(
+                    color='red',
+                    width=2,
+                    dash='dash'
+                ),
+                name='Wafer Boundary',
+                showlegend=True if i == 0 else False,  # Only show legend once
+                hoverinfo='skip'
+            ),
+            row=row, col=col
+        )
+        
+        # Update axes for this subplot with equal aspect ratio
+        fig.update_xaxes(
+            title_text='X Position (mm)',
+            range=[-150, 150],
+            constrain='domain',
+            row=row, col=col
+        )
+        # For plotly subplots: first subplot uses "x", subsequent ones use "x2", "x3", etc.
+        x_axis_name = "x" if i == 0 else f"x{i+1}"
+        fig.update_yaxes(
+            title_text='Y Position (mm)',
+            range=[-150, 150],
+            scaleanchor=x_axis_name,
+            scaleratio=1,
+            constrain='domain',
+            row=row, col=col
+        )
+    
+    # Create title with file info
+    file_info = f" ({len(selected_files)} files selected)" if selected_files else " (All files)"
+    title_text = f'TEST Thickness Contour Plot by DECK{file_info}'
+    if offset != 0:
+        title_text += f' (Offset: {offset:+.1f} Å)'
+    
+    # Update layout
+    fig.update_layout(
+        title=title_text,
+        height=800,
+        margin=dict(l=50, r=50, t=100, b=50),
+        showlegend=False
+    )
+    
+    return dcc.Graph(figure=fig)
+
+def make_por_contour_plot(selected_entities=None):
+    """Create contour plot of POR thickness aggregated across selected entities by COATER"""
+    if por_df.empty:
+        return html.Div("No POR data available for contour analysis")
+    
+    # Filter for thickness data only
+    thickness_data = por_df[por_df['Label'] == 'Layer 1 Thickness'].copy()
+    
+    if thickness_data.empty:
+        return html.Div("No POR thickness data available")
+    
+    # Filter by selected entities if specified
+    if selected_entities:
+        thickness_data = thickness_data[thickness_data['Entity'].isin(selected_entities)]
+        
+    if thickness_data.empty:
+        return html.Div("No data available for selected entities")
+    
+    # Convert coordinates to numeric and filter to within wafer radius (150mm)
+    thickness_data['X_coord'] = pd.to_numeric(thickness_data['XWaferLoc'], errors='coerce')
+    thickness_data['Y_coord'] = pd.to_numeric(thickness_data['YWaferLoc'], errors='coerce')
+    
+    # Calculate radius for each point and filter to within wafer boundary (≤ 150mm)
+    thickness_data['calc_radius'] = np.sqrt(thickness_data['X_coord']**2 + thickness_data['Y_coord']**2)
+    
+    thickness_data = thickness_data[
+        (thickness_data['X_coord'].notna()) & 
+        (thickness_data['Y_coord'].notna()) &
+        (thickness_data['calc_radius'] <= 150)  # Only points within wafer boundary
+    ].copy()
+    
+    if thickness_data.empty:
+        return html.Div("No thickness data with valid coordinates (within 150mm radius) available")
+    
+    # Aggregate data by averaging thickness at each X,Y coordinate across all selected entities for each COATER
+    aggregated_data = thickness_data.groupby(['COATER', 'X_coord', 'Y_coord'])['Datum'].mean().reset_index()
+    
+    # Create the figure with subplots for each coater
+    coaters = sorted(aggregated_data['COATER'].unique())
+    n_coaters = len(coaters)
+    
+    if n_coaters == 0:
+        return html.Div("No valid COATER data for contour plot")
+    
+    # Calculate subplot layout (3x1 vertical layout for up to 3 coaters)
+    cols = min(3, n_coaters)
+    rows = 1
+    
+    from plotly.subplots import make_subplots
+    
+    fig = make_subplots(
+        rows=rows, cols=cols,
+        subplot_titles=[f'COATER {coater}' for coater in coaters],
+        specs=[[{'type': 'scattergl'}] * cols]
+    )
+    
+    # Define colors for each coater
+    coater_colors = ['Blues', 'Oranges', 'Greens']
+    
+    for i, coater in enumerate(coaters):
+        coater_data = aggregated_data[aggregated_data['COATER'] == coater]
+        
+        if coater_data.empty:
+            continue
+            
+        col = i + 1
+        
+        # Create interpolation grid for circular contour
+        xi = np.linspace(-150, 150, 100)
+        yi = np.linspace(-150, 150, 100)
+        xi_grid, yi_grid = np.meshgrid(xi, yi)
+        
+        # Create circular mask for 150mm wafer
+        mask = np.sqrt(xi_grid**2 + yi_grid**2) <= 150
+        
+        # Interpolate data onto grid
+        points = coater_data[['X_coord', 'Y_coord']].values
+        values = coater_data['Datum'].values
+        zi = griddata(points, values, (xi_grid, yi_grid), method='cubic')
+        
+        # Apply circular mask
+        zi[~mask] = np.nan
+        
+        # Create contour plot for this coater
+        fig.add_trace(
+            go.Contour(
+                x=xi,
+                y=yi,
+                z=zi,
+                colorscale=coater_colors[i % len(coater_colors)],
+                contours=dict(
+                    showlabels=True,
+                    labelfont=dict(size=10),
+                ),
+                hovertemplate='<b>COATER %{fullData.name}</b><br>' +
+                              'X: %{x:.1f} mm<br>' +
+                              'Y: %{y:.1f} mm<br>' +
+                              'Thickness: %{z:.1f} Å<br>' +
+                              '<extra></extra>',
+                name=str(coater),
+                showscale=True if i == 0 else False  # Only show colorbar for first plot
+            ),
+            row=1, col=col
+        )
+        
+        # Add scatter points to show actual measurement locations
+        fig.add_trace(
+            go.Scattergl(
+                x=coater_data['X_coord'],
+                y=coater_data['Y_coord'],
+                mode='markers',
+                marker=dict(
+                    size=4,
+                    color='black',
+                    opacity=0.6
+                ),
+                name=f'COATER {coater} Points',
+                showlegend=False,
+                hoverinfo='skip'
+            ),
+            row=1, col=col
+        )
+        
+        # Add wafer boundary circle (150mm radius)
+        theta = np.linspace(0, 2*np.pi, 100)
+        circle_x = 150 * np.cos(theta)
+        circle_y = 150 * np.sin(theta)
+        
+        fig.add_trace(
+            go.Scattergl(
+                x=circle_x,
+                y=circle_y,
+                mode='lines',
+                line=dict(
+                    color='red',
+                    width=2,
+                    dash='dash'
+                ),
+                name='Wafer Boundary',
+                showlegend=True if i == 0 else False,  # Only show legend once
+                hoverinfo='skip'
+            ),
+            row=1, col=col
+        )
+        
+        # Update axes for this subplot with equal aspect ratio
+        fig.update_xaxes(
+            title_text='X Position (mm)',
+            range=[-150, 150],
+            constrain='domain',
+            row=1, col=col
+        )
+        # For plotly subplots: first subplot uses "x", subsequent ones use "x2", "x3", etc.
+        x_axis_name = "x" if i == 0 else f"x{i+1}"
+        fig.update_yaxes(
+            title_text='Y Position (mm)',
+            range=[-150, 150],
+            scaleanchor=x_axis_name,
+            scaleratio=1,
+            constrain='domain',
+            row=1, col=col
+        )
+    
+    # Create title with entity info
+    entity_info = f" ({len(selected_entities)} entities selected)" if selected_entities else " (All entities)"
+    title_text = f'POR Thickness Contour Plot by COATER{entity_info}'
+    
+    # Update layout
+    fig.update_layout(
+        title=title_text,
+        height=800,
+        margin=dict(l=50, r=50, t=100, b=50),
+        showlegend=False
+    )
+    
+    return dcc.Graph(figure=fig)
+
 def make_files_table():
     """Create a table showing all processed files"""
     if not all_processed_files:
@@ -1844,8 +2207,8 @@ app.layout = html.Div([
         html.Label("Select Files for Spline Analysis:", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
         dcc.Dropdown(
             id='spline-file-dropdown',
-            options=[{'label': file, 'value': file} for file in sorted(test_df['FileName'].unique())] if not test_df.empty else [],
-            value=None,  # Start with all files
+            options=[{'label': file, 'value': file} for file in sorted(test_df['FileName'].unique())] if not test_df.empty and 'FileName' in test_df.columns else [],
+            value=[],  # Start with empty selection, which means all files
             multi=True,
             placeholder="Select files (leave empty for all files)",
             style={'marginBottom': '15px'}
@@ -1853,6 +2216,17 @@ app.layout = html.Div([
     ], style={'margin': '15px 0'}),
     
     html.Div(id='test-radius-spline'),
+    
+    html.Hr(),
+    
+    # TEST Contour Analysis
+    html.H2("TEST Thickness Contour Plot by DECK (Wafer Surface Map)"),
+    html.P([
+        "Contour plot showing aggregated thickness distribution across wafer surface (±150mm). ",
+        "Uses same file selection as spline analysis. Data is averaged across selected files for each DECK."
+    ], style={'fontSize': '14px', 'marginBottom': '15px'}),
+    
+    html.Div(id='test-contour-plot'),
     
     html.Hr(),
     
@@ -1868,8 +2242,8 @@ app.layout = html.Div([
         html.Label("Select Entities for Spline Analysis:", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
         dcc.Dropdown(
             id='por-entity-dropdown',
-            options=[{'label': entity, 'value': entity} for entity in sorted(por_df['Entity'].unique())] if not por_df.empty else [],
-            value=None,  # Start with all entities
+            options=[{'label': entity, 'value': entity} for entity in sorted(por_df['Entity'].unique())] if not por_df.empty and 'Entity' in por_df.columns else [],
+            value=[],  # Start with empty selection, which means all entities
             multi=True,
             placeholder="Select entities (leave empty for all entities)",
             style={'marginBottom': '15px'}
@@ -1877,6 +2251,17 @@ app.layout = html.Div([
     ], style={'margin': '15px 0'}),
     
     html.Div(id='por-radius-spline'),
+    
+    html.Hr(),
+    
+    # POR Contour Analysis
+    html.H2("POR Thickness Contour Plot by COATER (Wafer Surface Map)"),
+    html.P([
+        "Contour plot showing aggregated thickness distribution across wafer surface (±150mm). ",
+        "Uses same entity selection as spline analysis. Data is averaged across selected entities for each COATER."
+    ], style={'fontSize': '14px', 'marginBottom': '15px'}),
+    
+    html.Div(id='por-contour-plot'),
     
     html.Hr(),
     
@@ -1894,23 +2279,45 @@ app.layout = html.Div([
      Output('test-time-series', 'children'),
      Output('test-deck-time-series', 'children'),
      Output('test-radius-spline', 'children'),
-     Output('por-radius-spline', 'children')],
+     Output('test-contour-plot', 'children'),
+     Output('por-radius-spline', 'children'),
+     Output('por-contour-plot', 'children')],
     [Input('offset-dropdown', 'value'),
      Input('spline-file-dropdown', 'value'),
-     Input('por-entity-dropdown', 'value')]
+     Input('por-entity-dropdown', 'value')],
+    prevent_initial_call=False
 )
 def update_plots(offset, selected_files, selected_entities):
     """Update all plots and tables when the matching offset changes, files, or entities are selected"""
-    return (
-        make_statistics_comparison_table(offset),
-        create_entity_comparison_plots(),
-        make_source_comparison_boxplot(offset),
-        create_test_summary_table(offset),
-        make_test_time_series_plot(offset),
-        make_test_deck_time_series_plot(offset),
-        make_test_radius_spline_plot(selected_files, offset),
-        make_por_radius_spline_plot(selected_entities)
-    )
+    try:
+        # Handle None values - when empty or None, it should mean "all"
+        if selected_files is None or (isinstance(selected_files, list) and len(selected_files) == 0):
+            selected_files = None
+        if selected_entities is None or (isinstance(selected_entities, list) and len(selected_entities) == 0):
+            selected_entities = None
+        
+        # Use default offset if None
+        if offset is None:
+            offset = 0
+        
+        return (
+            make_statistics_comparison_table(offset),
+            create_entity_comparison_plots(),
+            make_source_comparison_boxplot(offset),
+            create_test_summary_table(offset),
+            make_test_time_series_plot(offset),
+            make_test_deck_time_series_plot(offset),
+            make_test_radius_spline_plot(selected_files, offset),
+            make_test_contour_plot(selected_files, offset),
+            make_por_radius_spline_plot(selected_entities),
+            make_por_contour_plot(selected_entities)
+        )
+    
+    except Exception as e:
+        print(f"Error in callback update_plots: {e}")
+        # Return safe default components
+        error_div = html.Div(f"Error updating plots: {str(e)}")
+        return [error_div] * 10
 
 # Callback for Excel export
 @app.callback(
@@ -1921,14 +2328,21 @@ def update_plots(offset, selected_files, selected_entities):
 )
 def generate_excel_export(n_clicks, offset):
     """Generate and download Excel file with TEST data statistics including offset adjustment"""
-    if n_clicks > 0:
-        excel_data = create_test_export_excel(offset)
-        if excel_data:
-            offset_info = f"_offset{offset:+.1f}" if offset != 0 else ""
-            return dcc.send_bytes(
-                excel_data,
-                f"TEST_Statistical_Summary{offset_info}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            )
+    try:
+        if n_clicks and n_clicks > 0:
+            # Use default offset if None
+            if offset is None:
+                offset = 0
+                
+            excel_data = create_test_export_excel(offset)
+            if excel_data:
+                offset_info = f"_offset{offset:+.1f}" if offset != 0 else ""
+                return dcc.send_bytes(
+                    excel_data,
+                    f"TEST_Statistical_Summary{offset_info}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                )
+    except Exception as e:
+        print(f"Error in Excel export: {e}")
     return None
 
 if __name__ == '__main__':
