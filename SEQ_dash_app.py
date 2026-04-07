@@ -38,8 +38,39 @@ COATER_TO_DECK_MAPPING = {
 
 # ===== DATA LOADING FUNCTIONS =====
 
+def load_spin_speed_adjustments():
+    """Load spin speed adjustments from spin-speed-adjust.txt file"""
+    adjustments = {}
+    try:
+        # Read the spin-speed-adjust.txt file
+        with open('spin-speed-adjust.txt', 'r') as f:
+            lines = f.readlines()
+            
+        # Skip header line and process each adjustment
+        for line in lines[1:]:
+            if line.strip():  # Skip empty lines
+                parts = line.strip().split('\t')
+                if len(parts) >= 2:
+                    filename = parts[0].strip()
+                    try:
+                        offset = float(parts[1].strip())
+                        adjustments[filename] = offset
+                        print(f"Loaded adjustment: {filename} -> {offset}")
+                    except ValueError:
+                        print(f"Warning: Could not parse offset for {filename}")
+                        
+    except FileNotFoundError:
+        print("Warning: spin-speed-adjust.txt file not found. No adjustments will be applied.")
+    except Exception as e:
+        print(f"Error reading spin-speed-adjust.txt: {e}")
+        
+    return adjustments
+
 def load_test_data():
     """Load TEST data from XML files"""
+    # Load spin speed adjustments first
+    spin_adjustments = load_spin_speed_adjustments()
+    
     # Directories to search - using TEST directory
     dirs = ['TEST']  # TEST directory for XML files
     patterns = ['*.xml']  # All XML files in the directory
@@ -107,6 +138,11 @@ def load_test_data():
                 if label in ['Layer 1 Thickness', 'Goodness-of-Fit']:
                     try:
                         datum_val = float(datum)
+                        
+                        # Apply spin speed adjustment if available for this file and Layer 1 Thickness
+                        if label == 'Layer 1 Thickness' and filename in spin_adjustments:
+                            offset = spin_adjustments[filename]
+                            datum_val += offset
                         
                         # Round Layer 1 Thickness to 1 decimal place
                         if label == 'Layer 1 Thickness':
@@ -614,6 +650,95 @@ def make_normalized_comparison_boxplot(offset=0):
         xaxis_title='Data Source',
         yaxis_title='Normalized Layer 1 Thickness (Z-Score)',
         height=600
+    )
+    
+    return dcc.Graph(figure=fig)
+
+def make_goodness_fit_vs_thickness_plot(offset=0):
+    """Create scatter plot of Goodness of Fit vs Layer 1 Thickness colored by filename"""
+    if test_df.empty:
+        return html.Div("No TEST data available for goodness of fit analysis")
+    
+    # Apply offset to TEST data
+    modified_test_df = apply_offset_to_test_data(test_df, offset)
+    
+    # Get thickness and goodness of fit data
+    thickness_data = modified_test_df[modified_test_df['Label'] == 'Layer 1 Thickness'].copy()
+    goodness_data = modified_test_df[modified_test_df['Label'] == 'Goodness-of-Fit'].copy()
+    
+    if thickness_data.empty or goodness_data.empty:
+        return html.Div("No matched thickness and goodness-of-fit data available")
+    
+    # Match thickness and goodness-of-fit data by location_id (same measurement point)
+    matched_data = []
+    
+    for _, thickness_row in thickness_data.iterrows():
+        location_id = thickness_row['location_id']
+        wafer_id = thickness_row['WaferID']
+        filename = thickness_row['FileName']
+        
+        # Find matching goodness-of-fit measurement at the same location
+        matching_goodness = goodness_data[
+            (goodness_data['location_id'] == location_id) & 
+            (goodness_data['WaferID'] == wafer_id) &
+            (goodness_data['FileName'] == filename)
+        ]
+        
+        if not matching_goodness.empty:
+            goodness_value = matching_goodness.iloc[0]['Datum']
+            matched_data.append({
+                'Thickness': thickness_row['Datum'],
+                'Goodness_of_Fit': goodness_value,
+                'FileName': filename,
+                'WaferID': wafer_id,
+                'XWaferLoc': thickness_row['XWaferLoc'],
+                'YWaferLoc': thickness_row['YWaferLoc'],
+                'RADIUS': thickness_row['RADIUS']
+            })
+    
+    if not matched_data:
+        return html.Div("No matched thickness and goodness-of-fit measurements found")
+    
+    matched_df = pd.DataFrame(matched_data)
+    
+    # Create scatter plot
+    fig = px.scatter(
+        matched_df,
+        x='Thickness',
+        y='Goodness_of_Fit',
+        color='FileName',
+        title=f'Goodness of Fit vs Layer 1 Thickness by File (TEST Offset: {offset:+.1f} Å)' if offset != 0 else 'Goodness of Fit vs Layer 1 Thickness by File',
+        labels={
+            'Thickness': 'Layer 1 Thickness (Angstrom)',
+            'Goodness_of_Fit': 'Goodness of Fit',
+            'FileName': 'File Name'
+        },
+        hover_data=['WaferID', 'XWaferLoc', 'YWaferLoc', 'RADIUS']
+    )
+    
+    fig.update_layout(
+        height=600,
+        xaxis_title='Layer 1 Thickness (Angstrom)',
+        yaxis_title='Goodness of Fit',
+        showlegend=True,
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.02
+        )
+    )
+    
+    # Update hover template for better information
+    fig.update_traces(
+        hovertemplate='<b>%{fullData.name}</b><br>' +
+                      'Thickness: %{x:.1f} Å<br>' +
+                      'Goodness of Fit: %{y:.3f}<br>' +
+                      'Wafer: %{customdata[0]}<br>' +
+                      'Position: (%{customdata[1]}, %{customdata[2]})<br>' +
+                      'Radius: %{customdata[3]:.1f} mm<br>' +
+                      '<extra></extra>'
     )
     
     return dcc.Graph(figure=fig)
@@ -1832,6 +1957,55 @@ def make_files_table():
 
 # ===== EXCEL EXPORT FUNCTIONS =====
 
+def create_raw_data_export_excel(offset=0):
+    """Create Excel export for raw TEST data with offset applied, excluding COATER, DECK, and FileName"""
+    if test_df.empty:
+        return None
+    
+    # Apply offset to TEST data
+    modified_test_df = apply_offset_to_test_data(test_df, offset)
+    
+    if modified_test_df.empty:
+        return None
+    
+    # Define columns to exclude
+    exclude_columns = ['COATER', 'DECK', 'FileName']
+    
+    # Get columns to keep (all columns except excluded ones)
+    columns_to_keep = [col for col in modified_test_df.columns if col not in exclude_columns]
+    
+    # Create export dataframe with selected columns
+    export_df = modified_test_df[columns_to_keep].copy()
+    
+    # Sort by datetime and label for better organization
+    if 'datetime' in export_df.columns:
+        export_df = export_df.sort_values(['datetime', 'Label'], ascending=[True, True])
+    
+    # Create Excel file in memory
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        export_df.to_excel(writer, sheet_name='TEST Raw Data', index=False)
+        
+        # Get workbook and worksheet for basic formatting
+        workbook = writer.book
+        worksheet = writer.sheets['TEST Raw Data']
+        
+        # Auto-adjust column widths
+        for column in worksheet.columns:
+            max_length = 0
+            column_letter = column[0].column_letter
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+    
+    output.seek(0)
+    return output.getvalue()
+
 def create_test_export_excel(offset=0):
     """Create Excel export data for TEST statistics by COATER and File Name with offset applied"""
     if test_df.empty:
@@ -2142,26 +2316,52 @@ app.layout = html.Div([
     
     html.Hr(),
     
+    # Goodness of Fit Analysis
+    html.H2("Goodness of Fit vs Thickness Analysis"),
+    html.P("Scatter plot showing the relationship between goodness of fit and layer thickness measurements, colored by filename. Points represent matched measurements at the same wafer location."),
+    html.Div(id='goodness-fit-plot'),
+    
+    html.Hr(),
+    
     # TEST Data Export
     html.H2("TEST Data Export"),
     html.Div([
-        html.P("Export TEST data statistical summary to Excel format with metrics by COATER and File Name."),
-        html.Button(
-            "Export TEST Data to Excel",
-            id="export-button",
-            n_clicks=0,
-            style={
-                'backgroundColor': '#007acc',
-                'color': 'white',
-                'padding': '10px 20px',
-                'border': 'none',
-                'borderRadius': '5px',
-                'cursor': 'pointer',
-                'fontSize': '14px',
-                'marginBottom': '15px'
-            }
-        ),
-        dcc.Download(id="download-dataframe-xlsx")
+        html.Div([
+            html.P("Export TEST data statistical summary to Excel format with metrics by COATER and File Name."),
+            html.Button(
+                "Export Statistical Summary",
+                id="export-button",
+                n_clicks=0,
+                style={
+                    'backgroundColor': '#007acc',
+                    'color': 'white',
+                    'padding': '10px 20px',
+                    'border': 'none',
+                    'borderRadius': '5px',
+                    'cursor': 'pointer',
+                    'fontSize': '14px',
+                    'marginRight': '15px'
+                }
+            ),
+            html.Button(
+                "Export TEST Raw Data",
+                id="export-raw-button",
+                n_clicks=0,
+                style={
+                    'backgroundColor': '#28a745',
+                    'color': 'white',
+                    'padding': '10px 20px',
+                    'border': 'none',
+                    'borderRadius': '5px',
+                    'cursor': 'pointer',
+                    'fontSize': '14px'
+                }
+            )
+        ], style={'marginBottom': '10px'}),
+        html.P("Raw data export includes all TEST measurement data points (excludes internal columns like COATER, DECK, FileName).", 
+               style={'fontSize': '12px', 'fontStyle': 'italic', 'color': '#666'}),
+        dcc.Download(id="download-dataframe-xlsx"),
+        dcc.Download(id="download-raw-xlsx")
     ], style={'margin': '15px 0', 'padding': '15px', 'backgroundColor': '#f0f8ff', 'borderRadius': '5px'}),
     
     html.Hr(),
@@ -2275,6 +2475,7 @@ app.layout = html.Div([
     [Output('stats-table', 'children'),
      Output('entity-comparison', 'children'),
      Output('boxplot-comparison', 'children'),
+     Output('goodness-fit-plot', 'children'),
      Output('test-summary-table', 'children'),
      Output('test-time-series', 'children'),
      Output('test-deck-time-series', 'children'),
@@ -2304,6 +2505,7 @@ def update_plots(offset, selected_files, selected_entities):
             make_statistics_comparison_table(offset),
             create_entity_comparison_plots(),
             make_source_comparison_boxplot(offset),
+            make_goodness_fit_vs_thickness_plot(offset),
             create_test_summary_table(offset),
             make_test_time_series_plot(offset),
             make_test_deck_time_series_plot(offset),
@@ -2317,9 +2519,9 @@ def update_plots(offset, selected_files, selected_entities):
         print(f"Error in callback update_plots: {e}")
         # Return safe default components
         error_div = html.Div(f"Error updating plots: {str(e)}")
-        return [error_div] * 10
+        return [error_div] * 11
 
-# Callback for Excel export
+# Callback for Statistical Summary Excel export
 @app.callback(
     Output("download-dataframe-xlsx", "data"),
     [Input("export-button", "n_clicks"),
@@ -2343,6 +2545,32 @@ def generate_excel_export(n_clicks, offset):
                 )
     except Exception as e:
         print(f"Error in Excel export: {e}")
+    return None
+
+# Callback for Raw Data Excel export
+@app.callback(
+    Output("download-raw-xlsx", "data"),
+    [Input("export-raw-button", "n_clicks"),
+     Input('offset-dropdown', 'value')],
+    prevent_initial_call=True,
+)
+def generate_raw_excel_export(n_clicks, offset):
+    """Generate and download Excel file with raw TEST data including offset adjustment"""
+    try:
+        if n_clicks and n_clicks > 0:
+            # Use default offset if None
+            if offset is None:
+                offset = 0
+                
+            excel_data = create_raw_data_export_excel(offset)
+            if excel_data:
+                offset_info = f"_offset{offset:+.1f}" if offset != 0 else ""
+                return dcc.send_bytes(
+                    excel_data,
+                    f"TEST_Raw_Data_Export{offset_info}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+                )
+    except Exception as e:
+        print(f"Error in TEST Raw Data Excel export: {e}")
     return None
 
 if __name__ == '__main__':
